@@ -1,0 +1,75 @@
+workflows:
+  ios-build:
+    name: Build iOS IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    
+    environment:
+      node: 20
+      xcode: latest
+      cocoapods: default
+      groups:
+        - apple_credentials  # Tạo trên Codemagic UI
+      vars:
+        BUNDLE_ID: "vn.hnaut.locketcloud"
+    
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+    
+    scripts:
+      - name: Install dependencies
+        script: |
+          npm install
+
+      - name: Install Expo CLI
+        script: |
+          npm install -g expo-cli eas-cli
+
+      - name: Prebuild iOS project
+        script: |
+          npx expo prebuild --platform ios --clean
+
+      - name: Install CocoaPods
+        script: |
+          cd ios && pod install
+
+      - name: Set up code signing
+        script: |
+          # Codemagic tự xử lý certificates khi có Apple credentials
+          keychain initialize
+          
+          # Tải certificate từ App Store Connect API
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_DEVELOPMENT \
+            --create
+          
+          keychain add-certificates
+          
+          # Cập nhật Xcode project với signing
+          xcode-project use-profiles
+
+      - name: Build IPA
+        script: |
+          cd ios
+          WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 1 | head -1)
+          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
+          
+          xcode-project build-ipa \
+            --workspace "$WORKSPACE" \
+            --scheme "$SCHEME" \
+            --config Release
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - ios/build/Build/**/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    
+    publishing:
+      scripts:
+        - name: Notify
+          script: |
+            echo "Build complete! Download IPA from Codemagic dashboard."
