@@ -38,7 +38,7 @@ jobs:
           cd ios
           pod install
 
-      - name: Build app (unsigned)
+      - name: Build app for device (unsigned)
         run: |
           cd ios
           
@@ -46,7 +46,7 @@ jobs:
           SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
           echo "Workspace: $WORKSPACE | Scheme: $SCHEME"
           
-          # Build (không archive) — tạo .app trực tiếp
+          # Build trực tiếp cho iphoneos, output vào thư mục cụ thể
           xcodebuild build \
             -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
@@ -54,6 +54,7 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
+            CONFIGURATION_BUILD_DIR=$PWD/build/Release-iphoneos \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -61,28 +62,42 @@ jobs:
             PROVISIONING_PROFILE="" \
             ONLY_ACTIVE_ARCH=NO
 
-      - name: Create IPA
+      - name: Debug & Create IPA
         run: |
-          echo "=== Looking for .app ==="
-          find ios/build -name "*.app" -type d
+          echo "=== All .app directories ==="
+          find ios -name "*.app" -type d 2>/dev/null || echo "No .app found via find"
           
-          # Tìm .app trong Build/Products/Release-iphoneos/
-          APP_PATH=$(find ios/build -name "*.app" -type d -path "*/Release-iphoneos/*" | head -1)
+          echo "=== Build directory structure ==="
+          find ios/build -maxdepth 4 -type d 2>/dev/null || echo "No build dir"
           
-          # Fallback: tìm bất kỳ .app nào
+          echo "=== Searching for executables ==="
+          find ios/build -name "LocketCloud" -type f 2>/dev/null || echo "No executable"
+          find ios/build -name "*.app" 2>/dev/null || echo "No .app at all"
+          
+          # Tìm .app
+          APP_PATH=$(find ios -name "*.app" -type d 2>/dev/null | grep -v "Pods" | head -1)
+          
           if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find ios/build -name "*.app" -type d | head -1)
-          fi
-          
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: No .app found!"
-            echo "=== Full build directory ==="
-            find ios/build -type d -maxdepth 5
+            echo "=== FALLBACK: check all files in build ==="
+            ls -laR ios/build/Release-iphoneos/ 2>/dev/null || echo "No Release-iphoneos dir"
+            
+            echo "=== Check build settings ==="
+            cd ios
+            WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 1 | head -1)
+            SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
+            xcodebuild build \
+              -workspace "$WORKSPACE" \
+              -scheme "$SCHEME" \
+              -configuration Release \
+              -sdk iphoneos \
+              -showBuildSettings 2>/dev/null | grep -E "BUILT_PRODUCTS_DIR|FULL_PRODUCT_NAME|TARGET_BUILD_DIR" | head -10
+            cd ..
+            
+            echo "ERROR: Could not find .app bundle"
             exit 1
           fi
           
-          echo "Found: $APP_PATH"
-          
+          echo "Found app at: $APP_PATH"
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r LocketCloud.ipa Payload
@@ -103,10 +118,7 @@ jobs:
           name: LocketCloud v1.0.${{ github.run_number }}
           body: |
             🚀 Build from commit ${{ github.sha }}
-            
-            📱 Cài đặt:
-            1. Tải LocketCloud.ipa
-            2. Import vào SideStore/LiveContainer
+            📱 Tải LocketCloud.ipa → Import vào SideStore/LiveContainer
           files: LocketCloud.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
