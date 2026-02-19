@@ -38,71 +38,27 @@ jobs:
           cd ios
           pod install
 
-      - name: Create self-signed certificate
-        run: |
-          # Tạo keychain riêng cho CI
-          security create-keychain -p "ci_password" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "ci_password" build.keychain
-          security set-keychain-settings -t 3600 build.keychain
-          
-          # Tạo chứng chỉ tự ký (dùng macOS native tool)
-          cat > /tmp/cert.conf << 'CERTEOF'
-          [ req ]
-          distinguished_name = req_dn
-          prompt = no
-          [ req_dn ]
-          CN = Apple Development: CI Build
-          [ v3_codesign ]
-          keyUsage = critical, digitalSignature
-          extendedKeyUsage = codeSigning
-          CERTEOF
-          
-          # Tạo key + cert
-          openssl req -x509 -newkey rsa:2048 \
-            -keyout /tmp/key.pem -out /tmp/cert.pem \
-            -days 365 -nodes \
-            -subj "/CN=Apple Development: CI Build" \
-            -extensions v3_codesign \
-            -config /tmp/cert.conf
-          
-          # Export thành p12 VỚI password (macOS yêu cầu)
-          openssl pkcs12 -export \
-            -out /tmp/cert.p12 \
-            -inkey /tmp/key.pem \
-            -in /tmp/cert.pem \
-            -passout pass:build123
-          
-          # Import vào keychain với đúng password
-          security import /tmp/cert.p12 \
-            -k build.keychain \
-            -P "build123" \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security
-          
-          # Cho phép codesign access keychain
-          security set-key-partition-list \
-            -S apple-tool:,apple:,codesign: \
-            -s -k "ci_password" build.keychain
-          
-          # Thêm keychain vào search list
-          security list-keychains -s build.keychain
-          
-          # Xác nhận certificate đã import
-          echo "=== Certificates in keychain ==="
-          security find-identity -v -p codesigning build.keychain
-
-      - name: Build app with self-signed cert
+      - name: Patch project to disable signing
         run: |
           cd ios
+          PBXPROJ=$(find . -name "project.pbxproj" -path "*.xcodeproj/*" | head -1)
+          echo "Patching: $PBXPROJ"
           
+          # Disable code signing in the project file itself
+          sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development";/CODE_SIGN_IDENTITY = "";/g' "$PBXPROJ"
+          sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g' "$PBXPROJ"
+          sed -i '' 's/"CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]" = "iPhone Developer";/"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";/g' "$PBXPROJ"
+          sed -i '' 's/DEVELOPMENT_TEAM = [A-Z0-9]*;/DEVELOPMENT_TEAM = "";/g' "$PBXPROJ"
+          
+          # Verify patch
+          grep -c "CODE_SIGN_IDENTITY" "$PBXPROJ" || true
+
+      - name: Build app
+        run: |
+          cd ios
           WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 1 | head -1)
           SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
           echo "Building: $WORKSPACE / $SCHEME"
-          
-          # Lấy identity từ keychain
-          IDENTITY=$(security find-identity -v -p codesigning build.keychain | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "Signing with: $IDENTITY"
           
           xcodebuild build \
             -workspace "$WORKSPACE" \
@@ -111,28 +67,96 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
-            CODE_SIGN_IDENTITY="$IDENTITY" \
-            CODE_SIGNING_REQUIRED=YES \
-            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_TEAM="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            CODE_SIGN_STYLE=Manual \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO 2>&1 | tail -30
+            ONLY_ACTIVE_ARCH=NO \
+            ENABLE_BITCODE=NO \
+            2>&1 | tail -30
 
-      - name: Create IPA
+      - name: Assemble IPA manually
         run: |
-          echo "=== Searching .app ==="
-          find ios/build -name "*.app" -type d | grep -v "Pods"
+          echo "====== SEARCHING ALL BUILD OUTPUT ======"
           
-          APP_PATH=$(find ios/build/Build/Products -name "*.app" -type d 2>/dev/null | head -1)
-          if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find ios/build -name "*.app" -type d 2>/dev/null | grep -v "Pods" | head -1)
+          # Search everywhere
+          echo "--- .app directories ---"
+          find ios/build -name "*.app" -type d 2>/dev/null || echo "None"
+          
+          echo "--- Executable files ---"
+          find ios/build -name "LocketCloud" -type f 2>/dev/null || echo "None"
+          
+          echo "--- Info.plist files ---"
+          find ios/build -name "Info.plist" 2>/dev/null | grep -v "Pods" | head -10 || echo "None"
+          
+          echo "--- All items in Release-iphoneos ---"
+          ls -la ios/build/Build/Products/Release-iphoneos/ 2>/dev/null || echo "No Release-iphoneos"
+          
+          echo "--- Intermediates ---"
+          find ios/build/Build/Intermediates.noindex -name "*.app" -type d 2>/dev/null || echo "None in Intermediates"
+          find ios/build/Build/Intermediates.noindex -name "LocketCloud" -type f 2>/dev/null | head -5 || echo "No executable in Intermediates"
+          
+          echo "--- All dirs depth 4 ---"
+          find ios/build -maxdepth 4 -type d 2>/dev/null | head -40
+          
+          echo "--- ALL files named LocketCloud* ---"
+          find ios/build -name "LocketCloud*" 2>/dev/null | head -20
+          
+          # Try to find the .app or create it manually
+          APP_PATH=$(find ios/build -name "*.app" -type d 2>/dev/null | grep -v "Pods" | head -1)
+          
+          if [ -n "$APP_PATH" ]; then
+            echo "FOUND .app at: $APP_PATH"
+          else
+            echo "No .app found. Attempting manual assembly..."
+            
+            # Find the compiled executable
+            EXEC=$(find ios/build -name "LocketCloud" -type f -not -path "*/Intermediates.noindex/*/Objects-normal/*" 2>/dev/null | head -1)
+            
+            if [ -z "$EXEC" ]; then
+              # Try broader search
+              EXEC=$(find ios/build -name "LocketCloud" -type f 2>/dev/null | head -1)
+            fi
+            
+            if [ -z "$EXEC" ]; then
+              echo "FATAL: Cannot find compiled executable anywhere"
+              echo "====== COMPLETE FILE LISTING ======"
+              find ios/build -type f -name "*.o" 2>/dev/null | head -5 && echo "(.o files exist - compilation worked)"
+              find ios/build -type f 2>/dev/null | grep -v ".o$" | grep -v ".d$" | grep -v ".hmap" | head -30
+              exit 1
+            fi
+            
+            echo "Found executable: $EXEC"
+            
+            # Find Info.plist
+            PLIST=$(find ios/build -name "Info.plist" -not -path "*/Pods/*" -not -path "*/Intermediates.noindex/*/Objects-normal/*" 2>/dev/null | head -1)
+            if [ -z "$PLIST" ]; then
+              PLIST=$(find ios -name "Info.plist" -path "*/LocketCloud/*" -not -path "*/Pods/*" | head -1)
+            fi
+            echo "Found Info.plist: $PLIST"
+            
+            # Create .app bundle manually
+            APP_PATH="ios/build/ManualApp/LocketCloud.app"
+            mkdir -p "$APP_PATH"
+            cp "$EXEC" "$APP_PATH/LocketCloud"
+            [ -n "$PLIST" ] && cp "$PLIST" "$APP_PATH/Info.plist"
+            
+            # Copy frameworks
+            FRAMEWORKS_DIR=$(find ios/build/Build/Products/Release-iphoneos -maxdepth 1 -type d 2>/dev/null)
+            if [ -d "ios/build/Build/Products/Release-iphoneos" ]; then
+              mkdir -p "$APP_PATH/Frameworks"
+              find ios/build/Build/Products/Release-iphoneos -name "*.framework" -type d -exec cp -r {} "$APP_PATH/Frameworks/" \; 2>/dev/null || true
+            fi
+            
+            # Ad-hoc sign
+            codesign --force --deep --sign - "$APP_PATH" 2>/dev/null || echo "Ad-hoc signing skipped"
+            
+            echo "Manual .app created:"
+            ls -la "$APP_PATH/"
           fi
           
-          echo "App found: $APP_PATH"
-          ls -la "$APP_PATH/" | head -20
-          
+          echo "====== CREATING IPA ======"
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r LocketCloud.ipa Payload
@@ -152,15 +176,7 @@ jobs:
           tag_name: v${{ github.run_number }}
           name: LocketCloud v1.0.${{ github.run_number }}
           body: |
-            🚀 Build từ commit ${{ github.sha }}
-            
-            📱 Cách cài đặt:
-            1. Tải file LocketCloud.ipa bên dưới
-            2. Cài SideStore + LiveContainer trên iPhone
-            3. Import file IPA vào LiveContainer
-            4. Mở app → Đăng nhập → Sử dụng!
-            
-            🔄 Cập nhật: Tải IPA mới → Import lại vào LiveContainer
+            📱 Tải LocketCloud.ipa → Import vào SideStore/LiveContainer
           files: LocketCloud.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
