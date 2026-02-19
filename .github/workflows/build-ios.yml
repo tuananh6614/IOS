@@ -33,24 +33,15 @@ jobs:
       - name: Prebuild iOS project
         run: npx expo prebuild --platform ios --clean
 
-      - name: Debug - List iOS folder
-        run: |
-          echo "=== iOS folder contents ==="
-          ls -la ios/
-          echo "=== Workspace files ==="
-          find ios -name "*.xcworkspace" -type d
-          echo "=== Scheme list ==="
-          xcodebuild -workspace ios/*.xcworkspace -list 2>/dev/null || echo "Could not list schemes"
-
       - name: Build unsigned IPA
         run: |
           cd ios
           
-          # Tìm workspace và scheme tự động
+          # Tìm workspace tự động
           WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 1 | head -1)
           echo "Found workspace: $WORKSPACE"
           
-          # Lấy tên scheme từ workspace
+          # Lấy scheme
           SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
           echo "Found scheme: $SCHEME"
           
@@ -69,23 +60,26 @@ jobs:
 
       - name: Create IPA from archive
         run: |
-          echo "=== Archive contents ==="
-          ls -la ios/build/App.xcarchive/Products/Applications/
+          echo "=== Searching for .app in archive ==="
+          find ios/build -name "*.app" -type d
           
-          cd ios/build/App.xcarchive/Products/Applications
+          # Tìm file .app ở bất kỳ đâu trong archive
+          APP_PATH=$(find ios/build -name "*.app" -type d | head -1)
           
-          # Tìm file .app tự động
-          APP_NAME=$(ls -d *.app | head -1)
-          echo "Found app: $APP_NAME"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app found in archive!"
+            exit 1
+          fi
           
+          echo "Found app at: $APP_PATH"
+          
+          # Tạo IPA trong thư mục gốc
           mkdir -p Payload
-          cp -r "$APP_NAME" Payload/
+          cp -r "$APP_PATH" Payload/
           zip -r LocketCloud.ipa Payload
           
-          # Copy IPA ra thư mục gốc
-          cp LocketCloud.ipa $GITHUB_WORKSPACE/LocketCloud.ipa
           echo "=== IPA created ==="
-          ls -la $GITHUB_WORKSPACE/LocketCloud.ipa
+          ls -la LocketCloud.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
