@@ -3,13 +3,14 @@ name: Build iOS IPA
 on:
   push:
     branches: [main]
-  workflow_dispatch: # Cho phép chạy thủ công từ GitHub UI
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-ios:
     runs-on: macos-latest
-    permissions:
-      contents: write
     
     steps:
       - name: Checkout code
@@ -19,10 +20,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Setup Expo
         uses: expo/expo-github-action@v8
@@ -33,17 +33,33 @@ jobs:
       - name: Prebuild iOS project
         run: npx expo prebuild --platform ios --clean
 
+      - name: Debug - List iOS folder
+        run: |
+          echo "=== iOS folder contents ==="
+          ls -la ios/
+          echo "=== Workspace files ==="
+          find ios -name "*.xcworkspace" -type d
+          echo "=== Scheme list ==="
+          xcodebuild -workspace ios/*.xcworkspace -list 2>/dev/null || echo "Could not list schemes"
+
       - name: Build unsigned IPA
         run: |
           cd ios
           
-          # Build archive không cần signing (cho SideStore ký lại)
-          xcodebuild -workspace LocketCloud.xcworkspace \
-            -scheme LocketCloud \
+          # Tìm workspace và scheme tự động
+          WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 1 | head -1)
+          echo "Found workspace: $WORKSPACE"
+          
+          # Lấy tên scheme từ workspace
+          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
+          echo "Found scheme: $SCHEME"
+          
+          xcodebuild -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
             -destination generic/platform=iOS \
-            -archivePath $PWD/build/LocketCloud.xcarchive \
+            -archivePath $PWD/build/App.xcarchive \
             archive \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
@@ -53,16 +69,29 @@ jobs:
 
       - name: Create IPA from archive
         run: |
-          cd ios/build/LocketCloud.xcarchive/Products/Applications
-          mkdir -p Payload
-          cp -r LocketCloud.app Payload/
-          zip -r ../../../../../LocketCloud.ipa Payload
+          echo "=== Archive contents ==="
+          ls -la ios/build/App.xcarchive/Products/Applications/
           
+          cd ios/build/App.xcarchive/Products/Applications
+          
+          # Tìm file .app tự động
+          APP_NAME=$(ls -d *.app | head -1)
+          echo "Found app: $APP_NAME"
+          
+          mkdir -p Payload
+          cp -r "$APP_NAME" Payload/
+          zip -r LocketCloud.ipa Payload
+          
+          # Copy IPA ra thư mục gốc
+          cp LocketCloud.ipa $GITHUB_WORKSPACE/LocketCloud.ipa
+          echo "=== IPA created ==="
+          ls -la $GITHUB_WORKSPACE/LocketCloud.ipa
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: LocketCloud-iOS
-          path: ios/LocketCloud.ipa
+          path: LocketCloud.ipa
           retention-days: 90
 
       - name: Create Release
@@ -78,7 +107,6 @@ jobs:
             1. Tải file LocketCloud.ipa bên dưới
             2. Mở SideStore trên iPhone
             3. Import file IPA vào LiveContainer
-          files: ios/LocketCloud.ipa
-          generate_release_notes: true
+          files: LocketCloud.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
