@@ -1,0 +1,11 @@
+node_modules/
+.expo/
+dist/
+*.ipa
+*.apk
+*.aab
+*.jks
+*.keystore
+.env
+CREDENTIALS.md
+client_secret_*.json

@@ -1,0 +1,82 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # Cho phép chạy thủ công từ GitHub UI
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Prebuild iOS project
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Build unsigned IPA
+        run: |
+          cd ios
+          
+          # Build archive không cần signing (cho SideStore ký lại)
+          xcodebuild -workspace LocketCloud.xcworkspace \
+            -scheme LocketCloud \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination generic/platform=iOS \
+            -archivePath $PWD/build/LocketCloud.xcarchive \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE=""
+
+      - name: Create IPA from archive
+        run: |
+          cd ios/build/LocketCloud.xcarchive/Products/Applications
+          mkdir -p Payload
+          cp -r LocketCloud.app Payload/
+          zip -r ../../../../../LocketCloud.ipa Payload
+          
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocketCloud-iOS
+          path: ios/LocketCloud.ipa
+          retention-days: 90
+
+      - name: Create Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: LocketCloud v1.0.${{ github.run_number }}
+          body: |
+            🚀 Auto-build from commit ${{ github.sha }}
+            
+            📱 Cách cài:
+            1. Tải file LocketCloud.ipa bên dưới
+            2. Mở SideStore trên iPhone
+            3. Import file IPA vào LiveContainer
+          files: ios/LocketCloud.ipa
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
