@@ -38,70 +38,95 @@ jobs:
           cd ios
           pod install
 
-      - name: Build app for device (unsigned)
+      - name: Get build settings
+        id: settings
         run: |
           cd ios
-          
           WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 1 | head -1)
           SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
+          echo "workspace=$WORKSPACE" >> $GITHUB_OUTPUT
+          echo "scheme=$SCHEME" >> $GITHUB_OUTPUT
           echo "Workspace: $WORKSPACE | Scheme: $SCHEME"
           
-          # Build trực tiếp cho iphoneos, output vào thư mục cụ thể
-          xcodebuild build \
-            -workspace "$WORKSPACE" \
+          # Show where xcode will put the build output
+          xcodebuild -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -showBuildSettings 2>/dev/null | grep -E "BUILT_PRODUCTS_DIR|FULL_PRODUCT_NAME|TARGET_BUILD_DIR|PRODUCT_NAME|WRAPPER_NAME" | head -20
+
+      - name: Build app
+        run: |
+          cd ios
+          xcodebuild build \
+            -workspace "${{ steps.settings.outputs.workspace }}" \
+            -scheme "${{ steps.settings.outputs.scheme }}" \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
-            CONFIGURATION_BUILD_DIR=$PWD/build/Release-iphoneos \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE="" \
-            ONLY_ACTIVE_ARCH=NO
+            ONLY_ACTIVE_ARCH=NO \
+            | tail -20
 
-      - name: Debug & Create IPA
+      - name: Find and package IPA
         run: |
-          echo "=== All .app directories ==="
-          find ios -name "*.app" -type d 2>/dev/null || echo "No .app found via find"
+          echo "========== FULL SEARCH =========="
+          echo "--- All .app bundles ---"
+          find ios/build -name "*.app" -type d 2>/dev/null || true
           
-          echo "=== Build directory structure ==="
-          find ios/build -maxdepth 4 -type d 2>/dev/null || echo "No build dir"
+          echo "--- All .app files (not dirs) ---"
+          find ios/build -name "*.app" 2>/dev/null || true
           
-          echo "=== Searching for executables ==="
-          find ios/build -name "LocketCloud" -type f 2>/dev/null || echo "No executable"
-          find ios/build -name "*.app" 2>/dev/null || echo "No .app at all"
+          echo "--- Build products dir ---"
+          find ios/build -name "Release-iphoneos" -type d 2>/dev/null || true
           
-          # Tìm .app
-          APP_PATH=$(find ios -name "*.app" -type d 2>/dev/null | grep -v "Pods" | head -1)
+          echo "--- Contents of Release-iphoneos (if exists) ---"
+          ls -la ios/build/Build/Products/Release-iphoneos/ 2>/dev/null || true
+          
+          echo "--- All directories 3 levels deep ---"
+          find ios/build -maxdepth 3 -type d 2>/dev/null || true
+          
+          echo "--- All directories 5 levels deep ---"
+          find ios/build -maxdepth 5 -type d 2>/dev/null | head -50 || true
+          
+          echo "--- All files with .app extension ---"
+          find ios -name "*.app" 2>/dev/null | head -20 || true
+          
+          echo "========== ATTEMPTING IPA CREATION =========="
+          
+          # Strategy 1: Standard derivedData path
+          APP_PATH=$(find ios/build/Build/Products -name "*.app" -type d 2>/dev/null | head -1)
+          
+          # Strategy 2: Any .app in build folder (excluding Pods)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find ios/build -name "*.app" -type d 2>/dev/null | grep -v "Pods" | head -1)
+          fi
+          
+          # Strategy 3: Any .app anywhere in ios folder
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find ios -name "*.app" -type d 2>/dev/null | grep -v "Pods" | grep -v "node_modules" | head -1)
+          fi
           
           if [ -z "$APP_PATH" ]; then
-            echo "=== FALLBACK: check all files in build ==="
-            ls -laR ios/build/Release-iphoneos/ 2>/dev/null || echo "No Release-iphoneos dir"
-            
-            echo "=== Check build settings ==="
-            cd ios
-            WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 1 | head -1)
-            SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
-            xcodebuild build \
-              -workspace "$WORKSPACE" \
-              -scheme "$SCHEME" \
-              -configuration Release \
-              -sdk iphoneos \
-              -showBuildSettings 2>/dev/null | grep -E "BUILT_PRODUCTS_DIR|FULL_PRODUCT_NAME|TARGET_BUILD_DIR" | head -10
-            cd ..
-            
-            echo "ERROR: Could not find .app bundle"
+            echo "FATAL: No .app found anywhere!"
+            echo "This likely means xcodebuild built successfully but didn't output an .app bundle"
+            echo "because code signing was disabled."
             exit 1
           fi
           
-          echo "Found app at: $APP_PATH"
+          echo "SUCCESS: Found app at: $APP_PATH"
+          echo "App contents:"
+          ls -la "$APP_PATH/"
+          
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r LocketCloud.ipa Payload
-          ls -la LocketCloud.ipa
+          echo "IPA size: $(du -h LocketCloud.ipa | cut -f1)"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
