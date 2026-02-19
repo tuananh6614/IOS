@@ -46,18 +46,19 @@ jobs:
           security unlock-keychain -p "ci_password" build.keychain
           security set-keychain-settings -t 3600 build.keychain
           
-          # Tạo chứng chỉ tự ký
-          cat > /tmp/cert.conf << 'EOF'
-          [req]
+          # Tạo chứng chỉ tự ký (dùng macOS native tool)
+          cat > /tmp/cert.conf << 'CERTEOF'
+          [ req ]
           distinguished_name = req_dn
           prompt = no
-          [req_dn]
+          [ req_dn ]
           CN = Apple Development: CI Build
-          [v3_codesign]
+          [ v3_codesign ]
           keyUsage = critical, digitalSignature
           extendedKeyUsage = codeSigning
-          EOF
+          CERTEOF
           
+          # Tạo key + cert
           openssl req -x509 -newkey rsa:2048 \
             -keyout /tmp/key.pem -out /tmp/cert.pem \
             -days 365 -nodes \
@@ -65,22 +66,27 @@ jobs:
             -extensions v3_codesign \
             -config /tmp/cert.conf
           
+          # Export thành p12 VỚI password (macOS yêu cầu)
           openssl pkcs12 -export \
             -out /tmp/cert.p12 \
             -inkey /tmp/key.pem \
             -in /tmp/cert.pem \
-            -passout pass:
+            -passout pass:build123
           
-          # Import vào keychain
+          # Import vào keychain với đúng password
           security import /tmp/cert.p12 \
             -k build.keychain \
-            -P "" \
+            -P "build123" \
             -T /usr/bin/codesign \
             -T /usr/bin/security
           
+          # Cho phép codesign access keychain
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
             -s -k "ci_password" build.keychain
+          
+          # Thêm keychain vào search list
+          security list-keychains -s build.keychain
           
           # Xác nhận certificate đã import
           echo "=== Certificates in keychain ==="
